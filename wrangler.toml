@@ -1,0 +1,9 @@
+name = "ap-table-store"
+main = "src/worker.ts"
+compatibility_date = "2026-09-01"
+
+# Create the namespace once with `wrangler kv namespace create TABLE`, then paste the id here.
+# `wrangler dev` (local mode) works with the placeholder.
+[[kv_namespaces]]
+binding = "TABLE"
+id = "a19849ca4ed54d35ba50f6814f6b586d"
