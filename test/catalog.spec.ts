@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { aliasesOf, defaultName, indexBody, indexEntry, isTableName, kindOf, mergeEntries, removeEntries, servedName } from '../src/catalog';
+import {
+  aliasesOf,
+  defaultName,
+  indexBody,
+  indexEntry,
+  isNameChars,
+  isServedName,
+  isTableName,
+  kindOf,
+  mergeEntries,
+  removeEntries,
+  servedName,
+} from '../src/catalog';
+import { readFileSync } from 'node:fs';
 import type { IndexEntry, TableHeader } from '../src/tableHeader';
 
 const header = (over: Partial<TableHeader> = {}): TableHeader => ({
@@ -38,6 +51,49 @@ describe('names', () => {
   });
 });
 
+describe('the served-name allowlist', () => {
+  it('serves the standard families and nothing else', () => {
+    for (const name of [
+      'table.bin.gz',
+      'maxed.bin.gz',
+      'delivery-09f8b316.bin.gz',
+      'acct-09c7c97a50bcbe5d44eea6f7.bin.gz',
+      'gear-859e797bf59a848dc75d4cbf.bin.gz',
+      'table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.bin.gz',
+      'table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.asbuilt.bin.gz',
+      'table-metronome-T4L_compass-T4E_gusset-T4L-te75-339.bin.gz',
+      'maxed.bin',
+    ])
+      expect(isServedName(name), name).toBe(true);
+
+    for (const name of [
+      'custom.bin.gz',
+      'index.json',
+      'delivery-xyz.bin.gz',
+      'acct-123.bin.gz',
+      'gear-0123456789abcdef01234567.json',
+      'table-metronome-T3E-te120.bin.gz',
+      'table-metronome-T3E_compass-T4C_gusset-T2E.bin.gz',
+      'wp-login.php',
+    ])
+      expect(isServedName(name), name).toBe(false);
+  });
+
+  it('normalises an upload name to the served form first (`maxed.bin` is `maxed.bin.gz`)', () => {
+    expect(isServedName('maxed.bin')).toBe(true);
+    expect(isServedName('delivery-09f8b316.bin')).toBe(true);
+  });
+
+  it('gates the raw path by its characters before any decoding', () => {
+    for (const segment of ['maxed.bin.gz', 'table-x-te1-2.bin.gz', 'a%20b.bin.gz'])
+      expect(isNameChars(segment), segment).toBe(true);
+    for (const segment of ['', '../x', 'a/b', 'x?y', 'x y', "x'y", 'x'.repeat(129)])
+      expect(isNameChars(segment), segment).toBe(false);
+  });
+});
+
+const gear = JSON.parse(readFileSync(new URL('./fixtures/gear-859e.json', import.meta.url).pathname, 'utf8'));
+
 describe('kindOf', () => {
   it('reads the kind from the published name families', () => {
     expect(kindOf('acct-09c7c97a50bcbe5d44eea6f7.bin.gz')).toBe('account');
@@ -61,34 +117,46 @@ describe('kindOf', () => {
 });
 
 describe('aliasesOf', () => {
-  it('serves a delivery table under its delivery key', () => {
-    expect(aliasesOf('table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.bin.gz', { deliveryKey: '09f8b316' }))
+  it('serves a delivery table under its delivery key', async () => {
+    expect(await aliasesOf('table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.bin.gz', { deliveryKey: '09f8b316' }))
       .toEqual(['delivery-09f8b316.bin.gz']);
-    expect(aliasesOf('delivery-09f8b316.bin.gz', { deliveryKey: '09f8b316' })).toEqual([]);
+    expect(await aliasesOf('delivery-09f8b316.bin.gz', { deliveryKey: '09f8b316' })).toEqual([]);
   });
 
-  it('does not let an .asbuilt variant take the alias from the refreshed table', () => {
-    expect(aliasesOf('table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.asbuilt.bin.gz', { deliveryKey: '09f8b316' }))
+  it('does not let an .asbuilt variant take the alias from the refreshed table', async () => {
+    expect(await aliasesOf('table-metronome-T3E_compass-T4C_gusset-T2E-te120-489.asbuilt.bin.gz', { deliveryKey: '09f8b316' }))
       .toEqual([]);
   });
 
-  it('answers to both maxed names', () => {
-    expect(aliasesOf('maxed.bin.gz')).toEqual(['table.bin.gz']);
-    expect(aliasesOf('table.bin.gz')).toEqual(['maxed.bin.gz']);
+  it('answers to both maxed names', async () => {
+    expect(await aliasesOf('maxed.bin.gz')).toEqual(['table.bin.gz']);
+    expect(await aliasesOf('table.bin.gz')).toEqual(['maxed.bin.gz']);
   });
 
-  it('gives account and gear tables no aliases', () => {
-    expect(aliasesOf('acct-09c7c97a50bcbe5d44eea6f7.bin.gz', { deliveryKey: '0b85c7a1' })).toEqual([]);
-    expect(aliasesOf('gear-859e797bf59a848dc75d4cbf.bin.gz', { deliveryKey: '920db740' })).toEqual([]);
+  it('serves a gear table under the other names its stamp is looked up by', async () => {
+    const names = await aliasesOf('gear-859e797bf59a848dc75d4cbf.bin.gz', { gear, deliveryKey: '920db740' } as never);
+    // v3 is the uploaded name itself; the other two rules are registered beside it.
+    expect(names).toHaveLength(2);
+    expect(names.every(n => /^gear-[0-9a-f]{24}\.bin\.gz$/.test(n))).toBe(true);
+    expect(names).not.toContain('gear-859e797bf59a848dc75d4cbf.bin.gz');
+  });
+
+  it('never makes an account\'s own table reachable by its gear', async () => {
+    const names = await aliasesOf('acct-09c7c97a50bcbe5d44eea6f7.bin.gz', { gear } as never);
+    expect(names).toEqual([]);
   });
 });
 
 describe('defaultName', () => {
-  it('names an unnamed delivery or maxed upload, and asks for the rest', () => {
-    expect(defaultName({ deliveryKey: '09f8b316' }, 'delivery')).toBe('delivery-09f8b316.bin.gz');
-    expect(defaultName({}, 'maxed')).toBe('maxed.bin.gz');
-    expect(defaultName({ gear: {} }, 'account')).toBeNull();
-    expect(defaultName({}, 'delivery')).toBeNull();
+  it('names an unnamed delivery or maxed upload, and asks for the rest', async () => {
+    expect(await defaultName({ deliveryKey: '09f8b316' }, 'delivery')).toBe('delivery-09f8b316.bin.gz');
+    expect(await defaultName({}, 'maxed')).toBe('maxed.bin.gz');
+    expect(await defaultName({ gear }, 'account')).toBeNull();
+    expect(await defaultName({}, 'delivery')).toBeNull();
+  });
+
+  it('names an unnamed gear table from its stamp (the v3 name)', async () => {
+    expect(await defaultName({ gear }, 'gear')).toBe('gear-859e797bf59a848dc75d4cbf.bin.gz');
   });
 });
 

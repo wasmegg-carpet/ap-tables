@@ -13,6 +13,7 @@
  *
  * Everything is served gzipped; `.bin` uploads are compressed on the way in.
  */
+import { gearTableNames } from './gear';
 import type { IndexEntry, TableHeader, TableKind } from './tableHeader';
 
 /** `NAME.bin` or `NAME.bin.gz`: a file name, never a path. */
@@ -22,6 +23,47 @@ const GEAR = /^gear-[0-9a-f]{24}\.bin$/;
 const DELIVERY_KEY = /^delivery-[0-9a-f]{8}\.bin$/;
 const DELIVERY_NAMED = /^table-.+\.bin$/;
 const DELIVERY_KEY_HEX = /^[0-9a-f]{8}$/;
+
+/**
+ * The names the store serves — and therefore the only names it accepts at upload. Anything
+ * else is a 404 before the worker decodes the path or touches KV, so a scanner cannot make
+ * it pay for random names. A new naming family is a change here, deliberately.
+ *
+ *   table.bin.gz | maxed.bin.gz
+ *   delivery-<8 hex>.bin.gz
+ *   acct-<24 hex>.bin.gz | gear-<24 hex>.bin.gz
+ *   table-<built name>-te<from>-<to>[.asbuilt].bin.gz
+ */
+const SERVED = new RegExp(
+  '^(?:' +
+    [
+      '(?:table|maxed)\\.bin\\.gz',
+      'delivery-[0-9a-f]{8}\\.bin\\.gz',
+      '(?:acct|gear)-[0-9a-f]{24}\\.bin\\.gz',
+      'table-[A-Za-z0-9_.-]+-te\\d+-\\d+(?:\\.asbuilt)?\\.bin\\.gz',
+    ].join('|') +
+    ')$'
+);
+
+/** Whether this store serves (and accepts) a name. Exposed as its source, for tests. */
+export const SERVED_NAME = SERVED;
+
+/** `index.json` is the catalog itself, not a table file. */
+export const INDEX_NAME = 'index.json';
+
+/** A served table name (not the catalog). */
+export function isServedName(name: string): boolean {
+  return SERVED.test(servedName(name));
+}
+
+/**
+ * Cheap gate for the raw path segment, before percent-decoding or a KV read: the characters
+ * a served name can be written with. A path with anything else — `'`, `?`, `/`, spaces,
+ * `../` — is answered without KV being consulted.
+ */
+export function isNameChars(segment: string): boolean {
+  return segment.length > 0 && segment.length <= 128 && /^[A-Za-z0-9._%~-]+$/.test(segment);
+}
 
 export function isTableName(name: string): boolean {
   return NAME.test(name) && !name.includes('..') && !name.includes('/');
@@ -49,8 +91,10 @@ export function kindOf(name: string, header: Pick<TableHeader, 'deliveryKey' | '
   if (base === 'table.bin' || base === 'maxed.bin') return 'maxed';
   if (DELIVERY_KEY.test(base)) return 'delivery';
   if (DELIVERY_NAMED.test(base)) return 'delivery';
-  if (header.deliveryKey) return 'delivery';
+  // A gear stamp outranks a delivery key: a table built on an account's gear carries both, and
+  // what it is is the gear (the Table Builder's fixed-delivery tables carry only the key).
   if (header.gear) return 'gear';
+  if (header.deliveryKey) return 'delivery';
   return 'maxed';
 }
 
@@ -78,32 +122,42 @@ export function indexEntry(
 }
 
 /**
- * The other names a file answers to. Two come from the standard:
+ * The other names a file answers to, as the client looks them up (src/gear.ts, ported from
+ * AutoAutoAP's table naming):
  *
+ * - a gear table is also served under the canonical v3 and v2 names of its gear stamp and the
+ *   legacy one, so a page that works the name out from a save finds it whichever rule it uses.
+ *   Only for `gear-` tables: an `acct-` table is one account's own simulation and must not
+ *   become reachable by everyone wearing that gear.
  * - a delivery table is also served as `delivery-<deliveryKey>.bin.gz`, so a client that
  *   knows only the gear hash can fetch it without the built name. An `.asbuilt` variant
  *   is the same gear built the slow way and must not take the alias from the refreshed one.
  * - the maxed table answers to both `maxed.bin.gz` and `table.bin.gz` (the planner's own
  *   `precompute/table.bin` name).
  */
-export function aliasesOf(name: string, header: Pick<TableHeader, 'deliveryKey' | 'gear'> = {}): string[] {
+export async function aliasesOf(
+  name: string,
+  header: Pick<TableHeader, 'deliveryKey' | 'gear' | 'gearTo' | 'fake'> = {}
+): Promise<string[]> {
   const base = baseName(name);
   const out: string[] = [];
   const key = header.deliveryKey;
   // Only a delivery-kind table takes the hash alias: an account's or gear table's delivery
   // set is one its optimizer picked, not the thing the table is (the published index keeps
   // gear-859e… a gear table although its header names deliveryKey 920db740).
+  const kind = kindOf(name, header);
   if (
     key &&
     DELIVERY_KEY_HEX.test(key) &&
-    kindOf(name, header) === 'delivery' &&
+    kind === 'delivery' &&
     !/\.asbuilt\.bin$/.test(base) &&
     !DELIVERY_KEY.test(base)
   )
     out.push(`delivery-${key}.bin.gz`);
   if (base === 'table.bin') out.push('maxed.bin.gz');
   if (base === 'maxed.bin') out.push('table.bin.gz');
-  return out.filter(alias => alias !== name);
+  if (kind === 'gear') out.push(...(await gearTableNames(header.gear)));
+  return [...new Set(out.filter(alias => alias !== name))];
 }
 
 /**
@@ -111,10 +165,19 @@ export function aliasesOf(name: string, header: Pick<TableHeader, 'deliveryKey' 
  * maxed table's name. An account or gear table must be told its name — none can be
  * derived from the file without the player's id or gear stamp.
  */
-export function defaultName(header: Pick<TableHeader, 'deliveryKey' | 'gear'>, kind: TableKind): string | null {
+export async function defaultName(
+  header: Pick<TableHeader, 'deliveryKey' | 'gear'>,
+  kind: TableKind
+): Promise<string | null> {
   if (kind === 'delivery' && header.deliveryKey && DELIVERY_KEY_HEX.test(header.deliveryKey))
     return `delivery-${header.deliveryKey}.bin.gz`;
   if (kind === 'maxed') return 'maxed.bin.gz';
+  // A gear table names itself from its stamp (the v3 name); an account's table cannot, because
+  // the name comes from the player id, which the store must never be given.
+  if (kind === 'gear') {
+    const [v3] = await gearTableNames(header.gear);
+    if (v3) return v3;
+  }
   return null;
 }
 

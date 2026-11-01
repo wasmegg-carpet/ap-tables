@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { handle, type Env } from '../src/worker';
 import { packTable, type Cell } from './helpers';
@@ -5,8 +6,11 @@ import { packTable, type Cell } from './helpers';
 /** A KV namespace in a Map: get/put/delete with the three read types the worker uses. */
 class FakeKV {
   readonly store = new Map<string, ArrayBuffer | string>();
+  /** Reads so far: the allowlist's whole point is that a bad path costs none. */
+  gets = 0;
 
   async get(key: string, opts?: { type?: 'text' | 'json' | 'arrayBuffer' }): Promise<unknown> {
+    this.gets++;
     const value = this.store.get(key);
     if (value === undefined) return null;
     const text = typeof value === 'string' ? value : new TextDecoder().decode(value);
@@ -34,6 +38,9 @@ beforeEach(() => {
   kv = new FakeKV();
   env = { TABLE: kv as unknown as KVNamespace, UPLOAD_KEY: KEY };
 });
+
+/** A real gear stamp (the deployed gear-859e… table's header). */
+const GEAR = JSON.parse(readFileSync(new URL('./fixtures/gear-859e.json', import.meta.url).pathname, 'utf8'));
 
 const HEADER = {
   version: 1,
@@ -173,9 +180,48 @@ describe('GET /tables/<name>', () => {
     expect(await res.text()).toBe('Not found');
   });
 
+  it('answers paths outside the naming standard without reading KV', async () => {
+    for (const path of [
+      '/tables/wp-login.php',
+      '/tables/not-a-table-name',
+      '/tables/delivery-zzzzzzzz.bin.gz',
+      '/tables/acct-123.bin.gz',
+      '/tables/custom.bin.gz',
+      '/tables/index.json.bak',
+      '/meta/wp-login.php',
+    ]) {
+      kv.gets = 0;
+      const res = await get(path);
+      expect(res.status, path).toBe(404);
+      expect(kv.gets, path).toBe(0);
+    }
+  });
+
+  it('reads KV once for a name that passes the standard but is not stored', async () => {
+    kv.gets = 0;
+    expect((await get('/tables/delivery-11112222.bin.gz')).status).toBe(404);
+    expect(kv.gets).toBe(1);
+  });
+
   it('rejects a path that is not a table name', async () => {
     expect((await get('/tables/..%2Fsecret')).status).toBe(404);
     expect((await get('/tables/index.json/../../x')).status).toBe(404);
+  });
+
+  it('404s a percent-escape that is not valid UTF-8 instead of throwing', async () => {
+    for (const path of ['/tables/%E0%A4', '/meta/%E0%A4', '/meta/%E0%A4%A.bin.gz']) {
+      const res = await get(path);
+      expect(res.status, path).toBe(404);
+      expect(await res.text()).toBe('Not found');
+    }
+  });
+
+  it('405s a write method that has no route, as a read-only catalog does', async () => {
+    for (const method of ['POST', 'PUT', 'PATCH']) {
+      const res = await get('/tables/maxed.bin.gz', method);
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get('Allow')).toBe('GET, HEAD, DELETE, OPTIONS');
+    }
   });
 });
 
@@ -214,10 +260,10 @@ describe('upload', () => {
   });
 
   it('takes a name, kind and builtWith when the header has none', async () => {
-    const res = await upload('custom.bin.gz', table({}), { kind: 'gear', builtWith: 'someone' });
+    const res = await upload('gear-0123456789abcdef01234567.bin.gz', table({}), { kind: 'gear', builtWith: 'someone' });
     expect(res.status).toBe(200);
     const [entry] = (await res.json() as { tables: Record<string, unknown>[] }).tables;
-    expect(entry).toMatchObject({ name: 'custom.bin.gz', kind: 'gear', builtWith: 'someone' });
+    expect(entry).toMatchObject({ name: 'gear-0123456789abcdef01234567.bin.gz', kind: 'gear', builtWith: 'someone' });
   });
 
   it('asks for a name when nothing identifies the file', async () => {
@@ -251,10 +297,15 @@ describe('upload', () => {
   });
 
   it('takes extra aliases from the query', async () => {
-    const res = await upload('maxed.bin.gz', table({}), { aliases: 'spare.bin.gz, other.bin' });
+    const res = await upload('maxed.bin.gz', table({}), { aliases: 'acct-0123456789abcdef01234567.bin, delivery-11112222.bin' });
     expect(res.status).toBe(200);
-    expect((await index()).map(t => t.name)).toEqual(['maxed.bin.gz', 'table.bin.gz', 'spare.bin.gz', 'other.bin.gz']);
-    expect((await get('/tables/other.bin.gz')).status).toBe(200);
+    expect((await index()).map(t => t.name)).toEqual([
+      'maxed.bin.gz',
+      'table.bin.gz',
+      'acct-0123456789abcdef01234567.bin.gz',
+      'delivery-11112222.bin.gz',
+    ]);
+    expect((await get('/tables/delivery-11112222.bin.gz')).status).toBe(200);
   });
 
   it('rejects a corrupt file with a reason', async () => {
@@ -264,8 +315,45 @@ describe('upload', () => {
   });
 
   it('rejects a name with a path in it', async () => {
-    const res = await upload('../maxed.bin.gz', table({}));
-    expect(res.status).toBe(400);
+    expect((await upload('../maxed.bin.gz', table({}))).status).toBe(400);
+  });
+
+  it('rejects a name outside the standard, and an alias outside it too', async () => {
+    expect((await upload('custom.bin.gz', table({}))).status).toBe(400);
+    expect((await upload('maxed.bin.gz', table({}), { aliases: 'custom.bin.gz' })).status).toBe(400);
+  });
+});
+
+describe('gear and account tables', () => {
+  it('registers a gear table under the three names its stamp is looked up by', async () => {
+    const res = await upload('gear-859e797bf59a848dc75d4cbf.bin.gz', table({ gear: GEAR }));
+    expect(res.status).toBe(200);
+    const names = (await index()).map(t => t.name);
+    expect(names).toHaveLength(3);
+    expect(names[0]).toBe('gear-859e797bf59a848dc75d4cbf.bin.gz');
+    for (const name of names) expect(name).toMatch(/^gear-[0-9a-f]{24}\.bin\.gz$/);
+    // Every name serves the same bytes.
+    for (const name of names) expect((await get(`/tables/${name}`)).status).toBe(200);
+  });
+
+  it('names an unnamed gear table from its stamp', async () => {
+    const res = await upload(null, table({ gear: GEAR }));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { tables: { name: string }[] }).tables[0].name).toBe(
+      'gear-859e797bf59a848dc75d4cbf.bin.gz'
+    );
+  });
+
+  it('never registers gear names for an account table', async () => {
+    const res = await upload('acct-09c7c97a50bcbe5d44eea6f7.bin.gz', table({ gear: GEAR }));
+    expect(res.status).toBe(200);
+    expect((await index()).map(t => t.name)).toEqual(['acct-09c7c97a50bcbe5d44eea6f7.bin.gz']);
+  });
+
+  it('does not invent names for a file whose gear stamp is incomplete', async () => {
+    const res = await upload('gear-0123456789abcdef01234567.bin.gz', table({ gear: { earnings: [] } }));
+    expect(res.status).toBe(200);
+    expect((await index()).map(t => t.name)).toEqual(['gear-0123456789abcdef01234567.bin.gz']);
   });
 });
 
@@ -294,15 +382,15 @@ describe('DELETE and promote', () => {
       new Request(`${ORIGIN}/promote`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${KEY}` },
-        body: JSON.stringify({ name: 'spare.bin.gz', sha256: sha }),
+        body: JSON.stringify({ name: 'delivery-11112222.bin.gz', sha256: sha }),
       }),
       env,
       ctx
     );
     expect(res.status).toBe(200);
-    const entry = (await index()).find(t => t.name === 'spare.bin.gz')!;
-    expect(entry).toMatchObject({ kind: 'maxed', sha256: sha });
-    expect((await get('/tables/spare.bin.gz')).status).toBe(200);
+    const entry = (await index()).find(t => t.name === 'delivery-11112222.bin.gz')!;
+    expect(entry).toMatchObject({ kind: 'delivery', sha256: sha });
+    expect((await get('/tables/delivery-11112222.bin.gz')).status).toBe(200);
   });
 
   it('404s a promote to bytes that were never stored', async () => {
@@ -310,7 +398,7 @@ describe('DELETE and promote', () => {
       new Request(`${ORIGIN}/promote`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${KEY}` },
-        body: JSON.stringify({ name: 'spare.bin.gz', sha256: 'f'.repeat(64) }),
+        body: JSON.stringify({ name: 'delivery-11112222.bin.gz', sha256: 'f'.repeat(64) }),
       }),
       env,
       ctx

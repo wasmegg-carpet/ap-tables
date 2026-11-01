@@ -19,7 +19,18 @@
  *
  * Writes are rare and authed (UPLOAD_KEY); reads are open and edge-cached.
  */
-import { aliasesOf, defaultName, indexBody, indexEntry, isTableName, kindOf, mergeEntries, removeEntries, servedName } from './catalog';
+import {
+  aliasesOf,
+  defaultName,
+  indexBody,
+  indexEntry,
+  isNameChars,
+  isServedName,
+  kindOf,
+  mergeEntries,
+  removeEntries,
+  servedName,
+} from './catalog';
 import type { IndexEntry, TableHeader, TableKind } from './tableHeader';
 import { UPLOAD_PAGE } from './uploadPage';
 import { validateTable } from './validate';
@@ -75,13 +86,16 @@ export async function handle(request: Request, env: Env, ctx: ExecutionContext):
   if (path === '/tables/index.json' && isRead(request)) return serveIndex(request, env, ctx);
 
   if (path.startsWith('/tables/')) {
-    const name = decodeURIComponent(path.slice('/tables/'.length));
-    if (!isTableName(name)) return notFound();
+    // Cheap gate first, then the naming standard: either answer is a 404 with no decoding
+    // and no KV read, so a scanner cannot make the store pay for its random paths.
+    const raw = path.slice('/tables/'.length);
+    if (!isNameChars(raw)) return notFound();
+    const name = decoded(raw);
+    if (!name || !isServedName(name)) return notFound();
     if (isRead(request)) return serveBlob(request, env, ctx, name);
-    if (request.method === 'DELETE') {
-      const denied = await authed(request, env);
-      return denied ?? remove(name, env, url);
-    }
+    if (request.method !== 'DELETE') return methodNotAllowed();
+    const denied = await authed(request, env);
+    return denied ?? remove(name, env, url);
   }
 
   // The planner's own name for the maxed table (precompute/table.bin), kept working.
@@ -92,7 +106,11 @@ export async function handle(request: Request, env: Env, ctx: ExecutionContext):
     return entry ? json(entry) : notFound();
   }
   if (isRead(request) && path.startsWith('/meta/')) {
-    const entry = await getEntry(env, decodeURIComponent(path.slice('/meta/'.length)));
+    const raw = path.slice('/meta/'.length);
+    if (!isNameChars(raw)) return notFound();
+    const name = decoded(raw);
+    if (!name || !isServedName(name)) return notFound();
+    const entry = await getEntry(env, name);
     return entry ? json(entry) : notFound();
   }
 
@@ -137,6 +155,27 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+/** A path segment as a name; a percent-escape that is not valid UTF-8 is no name at all, not a 500. */
+function decoded(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+function methodNotAllowed(): Response {
+  return new Response('Method not allowed', {
+    status: 405,
+    headers: {
+      ...CORS,
+      Allow: 'GET, HEAD, DELETE, OPTIONS',
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
 function notFound(): Response {
   return new Response('Not found', {
     status: 404,
@@ -165,7 +204,8 @@ async function readIndex(env: Env): Promise<IndexEntry[]> {
 /** `GET|HEAD /tables/index.json`: edge-cached for 5 minutes, as the published catalog is. */
 async function serveIndex(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const cache = edge();
-  const key = await edgeKey(request.url);
+  // Keyed by path, like a table's: a query string must not buy a fresh KV read.
+  const key = await edgeKey(new URL('/tables/index.json', request.url).toString());
   if (cache && request.method === 'GET') {
     const hit = await cache.match(key);
     if (hit) return hit;
@@ -261,12 +301,20 @@ async function upload(request: Request, env: Env, url: URL): Promise<Response> {
     return json({ error: `kind must be one of ${KINDS.join(', ')}` }, 400);
 
   const askedName = url.searchParams.get('name');
-  if (askedName && !isTableName(askedName))
-    return json({ error: `"${askedName}" is not a table file name (NAME.bin or NAME.bin.gz)` }, 400);
+  if (askedName && !isServedName(askedName))
+    return json({ error: `"${askedName}" is not one of the served names (maxed.bin.gz, table.bin.gz, delivery-<8 hex>, acct-/gear-<24 hex>, table-<name>-te<from>-<to>)` }, 400);
   const kind = (override as TableKind | null) ?? kindOf(askedName ?? '', header);
-  const name = askedName ? servedName(askedName) : defaultName(header, kind);
-  if (!name) return json({ error: 'name is required for an account or gear table (nothing else identifies it)' }, 400);
-  if (!isTableName(name)) return json({ error: `"${name}" is not a table file name` }, 400);
+  const name = askedName ? servedName(askedName) : await defaultName(header, kind);
+  if (!name)
+    return json(
+      {
+        error:
+          'name is required: an account table is named from the player id (which the store never sees), ' +
+          'and this file carries no gear stamp to name itself by',
+      },
+      400
+    );
+  if (!isServedName(name)) return json({ error: `"${name}" is not one of the served names` }, 400);
 
   const builtWith = header.builtWith ?? url.searchParams.get('builtWith') ?? undefined;
   const stamped: TableHeader = { ...header, builtWith };
@@ -276,11 +324,11 @@ async function upload(request: Request, env: Env, url: URL): Promise<Response> {
     .map(a => a.trim())
     .filter(Boolean)
     .map(servedName);
-  const bad = extra.find(a => !isTableName(a));
-  if (bad) return json({ error: `"${bad}" is not a table file name` }, 400);
+  const bad = extra.find(a => !isServedName(a));
+  if (bad) return json({ error: `"${bad}" is not one of the served names` }, 400);
 
   const primary = indexEntry(name, stamped, { bytes, sha256 }, kind);
-  const names = [...new Set([name, ...aliasesOf(name, stamped), ...extra])];
+  const names = [...new Set([name, ...(await aliasesOf(name, stamped)), ...extra])];
   const entries = names.map(n => (n === name ? primary : indexEntry(n, stamped, { bytes, sha256 })));
 
   await env.TABLE.put(blobKey(sha256), gz);
@@ -306,7 +354,7 @@ async function promote(request: Request, env: Env, url: URL): Promise<Response> 
   }
   const name = body.name ? servedName(body.name) : '';
   const sha256 = body.sha256 ?? '';
-  if (!isTableName(name)) return json({ error: 'name must be a table file name' }, 400);
+  if (!isServedName(name)) return json({ error: 'name must be one of the served names' }, 400);
   if (!SHA.test(sha256)) return json({ error: 'sha256 must be 64 lowercase hex digits' }, 400);
 
   const bytes = await env.TABLE.get(blobKey(sha256), { type: 'arrayBuffer' });

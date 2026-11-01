@@ -1,0 +1,192 @@
+{
+"earnings": [
+{
+"artifact": "T4R Tungsten ankh",
+"stones": [
+"T3 Lunar stone"
+]
+},
+{
+"artifact": "T4E Demeters necklace",
+"stones": [
+"T3 Lunar stone",
+"T3 Lunar stone"
+]
+},
+{
+"artifact": "T4E Puzzle cube",
+"stones": [
+"T3 Lunar stone",
+"T3 Lunar stone"
+]
+},
+{
+"artifact": "T4E Lunar totem",
+"stones": [
+"T3 Lunar stone",
+"T3 Lunar stone"
+]
+}
+],
+"deliveryBare": [
+{
+"artifact": "T4E Gusset",
+"stones": [
+"T3 Quantum stone",
+"T3 Quantum stone"
+]
+},
+{
+"artifact": "T4E Interstellar compass",
+"stones": [
+"T3 Quantum stone",
+"T3 Quantum stone"
+]
+},
+{
+"artifact": "T4E Quantum metronome",
+"stones": [
+"T3 Quantum stone",
+"T3 Quantum stone"
+]
+},
+{
+"artifact": "T4L The chalice",
+"stones": [
+"T3 Quantum stone",
+"T3 Quantum stone",
+"T3 Quantum stone"
+]
+}
+],
+"deliveryFull": [
+{
+"artifact": "T4E Gusset",
+"stones": [
+"T3 Tachyon stone",
+"T3 Tachyon stone"
+]
+},
+{
+"artifact": "T4E Interstellar compass",
+"stones": [
+"T3 Tachyon stone",
+"T3 Tachyon stone"
+]
+},
+{
+"artifact": "T4E Quantum metronome",
+"stones": [
+"T3 Tachyon stone",
+"T3 Tachyon stone"
+]
+},
+{
+"artifact": "T4L The chalice",
+"stones": [
+"T3 Tachyon stone",
+"T3 Tachyon stone",
+"T3 Tachyon stone"
+]
+}
+],
+"research": {
+"atomic_purification": 50,
+"autonomous_vehicles": 5,
+"better_incubators": 15,
+"bigger_eggs": 1,
+"chrystal_shells": 100,
+"comfy_nests": 50,
+"compact_incubators": 10,
+"coordinated_clucking": 50,
+"dark_containment": 25,
+"driver_training": 30,
+"egg_loading_bots": 2,
+"eggsistor": 100,
+"enlightened_chickens": 150,
+"even_bigger_eggs": 5,
+"excitable_chickens": 25,
+"excoskeletons": 2,
+"genetic_purification": 100,
+"grav_plating": 25,
+"graviton_coating": 7,
+"hab_capacity1": 8,
+"hatchery_expansion": 10,
+"hatchery_rebuild1": 1,
+"hen_house_ac": 50,
+"hover_upgrades": 25,
+"hyper_portalling": 24,
+"improved_genetics": 30,
+"internal_hatchery1": 10,
+"internal_hatchery2": 10,
+"internal_hatchery3": 15,
+"internal_hatchery4": 30,
+"internal_hatchery5": 250,
+"leafsprings": 30,
+"lightweight_boxes": 40,
+"matter_reconfig": 500,
+"micro_coupling": 5,
+"microlux": 10,
+"motivational_clucking": 50,
+"multi_layering": 3,
+"neural_linking": 30,
+"neural_net_refine": 25,
+"nutritional_sup": 40,
+"padded_packaging": 30,
+"quantum_storage": 20,
+"relativity_optimization": 10,
+"rooster_booster": 25,
+"shell_fortification": 60,
+"super_alloy": 50,
+"superfeed": 35,
+"telepathic_will": 50,
+"time_compress": 20,
+"timeline_diversion": 50,
+"timeline_splicing": 1,
+"traffic_management": 2,
+"usde_prime": 1,
+"vehicle_reliablity": 2,
+"wormhole_dampening": 25
+},
+"epicResearch": {
+"accounting_tricks": 20,
+"afx_mission_capacity": 10,
+"afx_mission_time": 60,
+"bust_unions": 10,
+"cheaper_contractors": 10,
+"cheaper_research": 10,
+"drone_rewards": 20,
+"epic_clucking": 20,
+"epic_egg_laying": 20,
+"epic_hatchery": 20,
+"epic_internal_incubators": 20,
+"epic_multiplier": 100,
+"epic_silo_quality": 0,
+"hold_to_hatch": 15,
+"hold_to_research": 20,
+"int_hatch_calm": 20,
+"int_hatch_sharing": 10,
+"prestige_bonus": 20,
+"prophecy_bonus": 5,
+"silo_capacity": 20,
+"soul_eggs": 140,
+"transportation_lobbyist": 30,
+"video_doubler_time": 12,
+"warp_shift": 0
+},
+"colleggtibles": {
+"carbon-fiber": 3,
+"chocolate": 3,
+"easter": 3,
+"firework": 3,
+"flame-retardant": 3,
+"gatoregg": 3,
+"ice": 3,
+"lithium": 3,
+"pegg": 3,
+"pumpkin": 3,
+"silicon": 3,
+"waterballoon": 3,
+"wood": 3
+}
+}
